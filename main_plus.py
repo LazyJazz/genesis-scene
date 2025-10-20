@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import numpy as np
 import genesis as gs
@@ -11,6 +13,19 @@ def quat_geodesic_angle(q1, q2):
     d = np.clip(d, 0.0, 1.0)
     d = 2.0 * np.arccos(d)
     return np.min([d, 2 * np.pi - d])
+
+def quat_multiply(q1, q2):
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    return np.array([w, x, y, z])
+
+def quat_conjugate(q):
+    w, x, y, z = q
+    return np.array([w, -x, -y, -z])
 
 def quat_to_rotmat(q):
     """
@@ -114,126 +129,9 @@ def recover_pos_quat(P, Q):
 
     return t, rotation_to_quaternion(R)
 
-class TaskEnv:
-    def __init__(self, debug_mode=True, material="rigid"):
-        self.data_dir = f"data/{material}"
-        os.makedirs(self.data_dir, exist_ok=True)
-        self.debug_mode = debug_mode
-        self.material = material
-
-        self.scene = gs.Scene(
-                sim_options=gs.options.SimOptions(
-                    dt=5e-3,
-                    substeps=50,
-                ),
-                vis_options=gs.options.VisOptions(
-                    visualize_mpm_boundary=self.debug_mode
-                ),
-                viewer_options=gs.options.ViewerOptions(
-                    camera_pos=(3, -1, 1.5),
-                    camera_lookat=(0.0, 0.0, 0.0),
-                    camera_fov=30,
-                    max_FPS=60,
-                ),
-                mpm_options=gs.options.MPMOptions(
-                    lower_bound=(0.0, -0.5, 0.0),
-                    upper_bound=(1.0, 0.5, 1.0),
-                ),
-                fem_options=gs.options.FEMOptions(
-                    use_implicit_solver=False,
-                    damping=3.0
-                ),
-                pbd_options=gs.options.PBDOptions(
-                    particle_size=0.003,
-                ),
-                show_viewer=True
-            )
-
-        # self.franka = self.scene.add_entity(
-        #         gs.morphs.URDF(file="embodiments/franka-panda/panda.urdf", fixed=True, merge_fixed_links=False),
-        #         material=gs.materials.Rigid(coup_friction=1.0),
-        #     )
-        # self.hand_link_name = "panda_hand"
-        self.franka = self.scene.add_entity(
-                gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, -0.5, 0.1)),
-                material=gs.materials.Rigid(coup_friction=0.0, friction=0.01, coup_restitution=0.1, coup_softness=0.02),
-            )
-        self.hand_link_name = "hand"
-
-        self.plane = self.scene.add_entity(
-                gs.morphs.Plane(),
-            )
+class ControlPolicy:
+    def __init__(self):
         
-        self.targ_pos = np.array([0.5, -0.05, 0.125])
-        self.targ_quat = np.array([1.0, 0.0, 0.0, 1.0])
-        self.targ_quat /= np.linalg.norm(self.targ_quat)
-
-
-        # sample from poffset from [-0.2, 0.2]^2 and quat_offset from [-1, 1]^2
-        self.t_init_pos = np.array([0.55, -0.05, 0.126])
-        self.t_init_quat = np.array([1.0, 0.0, 0.0, 0.0])
-
-        table_material = gs.materials.Rigid(friction=1.0, coup_friction=0.5)
-        self.next_round_wait_step = 50
-        if self.material == "rigid":
-            material = None
-        elif self.material == "mpm":
-            material = gs.materials.MPM.Elastic(rho=200)
-        elif self.material == "fem":
-            material = gs.materials.FEM.Elastic(
-                E=1.0e5,  # stiffness
-                nu=0.45,  # compressibility (0 to 0.5)
-                rho=200.0,  # density
-                friction_mu=3.0,
-                hydroelastic_modulus=1e8,
-                model="stable_neohookean")
-
-        self.t_shape = self.scene.add_entity(
-            gs.morphs.Mesh(force_retet=True, file="T-shape-modified.obj", pos=self.t_init_pos, quat=self.t_init_quat, scale=1.0), surface=gs.surfaces.Default(color=(0.6, 0.7, 0.8)),
-            material=material
-        )
-        self.marker = self.scene.add_entity(gs.morphs.Mesh(file = "T-shape-modified.obj", pos=self.targ_pos - np.asarray([0.0, 0.0, 0.0495]), quat=self.targ_quat, scale=1.0, collision=False, fixed=True), surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)))
-        self.table = self.scene.add_entity(gs.morphs.Box(size=(2.0, 2.0, 0.1), pos=(0.0, 0.0, 0.05), fixed=True), material=table_material, surface=gs.surfaces.Default(color=(0.8, 0.7, 0.6)))
-
-
-        if self.debug_mode:
-            self.targ_point = self.scene.add_entity(gs.morphs.Sphere(radius=0.01, collision=False, fixed=True), surface=gs.surfaces.Default(color=(1.0, 1.0, 0.0), opacity=0.5))
-            self.current_point = self.scene.add_entity(gs.morphs.Sphere(radius=0.02, collision=False, fixed=True), surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0), opacity=0.5))
-
-        self.hand_cam = self.scene.add_camera(GUI=False, fov=70, res=(320, 320))
-        self.scene_cam = self.scene.add_camera(GUI=False, fov=40, res=(320, 320), pos=(2, 0, 1.5), lookat=(0.0, 0.0, 0.0))
-        self.cams = [self.hand_cam, self.scene_cam]
-        T = np.eye(4)
-        T[:3, :3] = np.array([
-            [1,  0,  0],
-            [0, -1,  0],
-            [0,  0, -1]
-        ])
-        T[:3, 3] = np.array([0.1, 0.0, 0.1])
-        self.hand_cam.attach(self.franka.get_link("hand"), T)
-
-        self.scene.build()
-
-        print(f"{self.t_shape.get_mass_mat()}")
-
-        self.motors_dof = np.arange(7)
-        self.fingers_dof = np.arange(7, 9)
-
-        # Optional: set control gains
-        self.franka.set_dofs_kp(
-            np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]),
-        )
-        self.franka.set_dofs_kv(
-            np.array([450, 450, 350, 350, 200, 200, 200, 10, 10]),
-        )
-        self.franka.set_dofs_force_range(
-            np.array([-87, -87, -87, -87, -12, -12, -12, -100, -100]),
-            np.array([87, 87, 87, 87, 12, 12, 12, 100, 100]),
-        )
-
-        # franka.control_dofs_position(np.array([0, 0]), fingers_dof) # you can also use position control
-
-
         self.key_point_poses = [
             np.array([0.000, 0.055, 0.000]), # 0
             np.array([0.025, 0.055, 0.000]), # 1
@@ -311,6 +209,175 @@ class TaskEnv:
         for key_point_normals in self.key_point_normals:
             key_point_normals /= np.linalg.norm(key_point_normals)
 
+    def control(self, env: TaskEnv):
+        pos, quat = env.get_pos_quat()
+        print(f"pos: {pos}, quat: {quat}")
+        R = quat_to_rotmat(quat)
+        head_pos = env.get_head_pos()
+        rel_pos = head_pos - pos
+        rel_pos_in_obj = R.T @ rel_pos
+        move_direction = -rel_pos_in_obj.copy()
+
+        tpos_diff = (env.targ_pos - pos) / 0.1
+        tpos_diff_in_obj = R.T @ tpos_diff
+        tquat_diff = quat_multiply(env.targ_quat, quat_conjugate(quat))
+
+
+        # find the closest key point
+        best_score = 1e8
+        best_index = -1
+        for i, key_point in enumerate(self.key_point_poses):
+            # cross 
+            r = key_point
+            f = -self.key_point_normals[i]
+            tau = np.cross(r, f)
+            omega = tau / 0.3
+            f /= 0.1
+            q_omega = 0.5 * np.array([0.0, omega[0], omega[1], omega[2]])
+            quat_dot = quat_multiply(quat, q_omega)
+            tquat_diff_dot = quat_multiply(env.targ_quat, quat_conjugate(quat_dot))
+            E = np.dot(tpos_diff_in_obj, tpos_diff_in_obj)
+            E_dot = -2.0 * np.dot(tpos_diff_in_obj, f)
+            if tquat_diff[0] < 0:
+                E += (tquat_diff[0] + 1) ** 2
+                E_dot += 2.0 * (tquat_diff_dot[0] + 1) * tquat_diff_dot[0]
+            else:
+                E += (tquat_diff[0] - 1) ** 2
+                E_dot += 2.0 * (tquat_diff_dot[0] - 1) * tquat_diff_dot[0]
+
+            if E_dot < best_score:
+                best_score = E_dot
+                best_index = i
+
+        env.mark_point.set_pos(R @ (self.key_point_poses[best_index] + self.key_point_normals[best_index] * 0.02) + pos)
+
+        # normalize
+        move_direction /= (np.linalg.norm(move_direction) + 1e-8)
+        env.set_head_pos(head_pos + R @ move_direction * 0.03)
+
+        
+
+class TaskEnv:
+    def __init__(self, debug_mode=True, material="rigid"):
+        self.data_dir = f"data/{material}"
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.debug_mode = debug_mode
+        self.material = material
+
+        self.scene = gs.Scene(
+                sim_options=gs.options.SimOptions(
+                    dt=5e-3,
+                    substeps=50,
+                ),
+                vis_options=gs.options.VisOptions(
+                    visualize_mpm_boundary=self.debug_mode
+                ),
+                viewer_options=gs.options.ViewerOptions(
+                    camera_pos=(3, -1, 1.5),
+                    camera_lookat=(0.0, 0.0, 0.0),
+                    camera_fov=30,
+                    max_FPS=60,
+                ),
+                mpm_options=gs.options.MPMOptions(
+                    lower_bound=(0.0, -0.5, 0.0),
+                    upper_bound=(1.0, 0.5, 1.0),
+                ),
+                fem_options=gs.options.FEMOptions(
+                    use_implicit_solver=False,
+                    damping=3.0
+                ),
+                pbd_options=gs.options.PBDOptions(
+                    particle_size=0.003,
+                ),
+                show_viewer=True
+            )
+
+        # self.franka = self.scene.add_entity(
+        #         gs.morphs.URDF(file="embodiments/franka-panda/panda.urdf", fixed=True, merge_fixed_links=False),
+        #         material=gs.materials.Rigid(coup_friction=1.0),
+        #     )
+        # self.hand_link_name = "panda_hand"
+        self.franka = self.scene.add_entity(
+                gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml", pos=(0.0, 0.0, 0.1)),
+                material=gs.materials.Rigid(coup_friction=0.0, friction=0.01, coup_restitution=0.1, coup_softness=0.02),
+            )
+        self.hand_link_name = "hand"
+
+        self.plane = self.scene.add_entity(
+                gs.morphs.Plane(),
+            )
+        
+        self.targ_pos = np.array([0.5, -0.05, 0.125])
+        self.targ_quat = np.array([1.0, 0.0, 0.0, 1.0])
+        self.targ_quat /= np.linalg.norm(self.targ_quat)
+
+
+        # sample from poffset from [-0.2, 0.2]^2 and quat_offset from [-1, 1]^2
+        self.t_init_pos = np.array([0.55, -0.05, 0.126])
+        self.t_init_quat = np.array([1.0, 0.0, 0.0, 0.0])
+
+        table_material = gs.materials.Rigid(friction=1.0, coup_friction=0.5)
+        self.next_round_wait_step = 50
+        if self.material == "rigid":
+            material = None
+        elif self.material == "mpm":
+            material = gs.materials.MPM.Elastic(rho=200)
+        elif self.material == "fem":
+            material = gs.materials.FEM.Elastic(
+                E=1.0e5,  # stiffness
+                nu=0.45,  # compressibility (0 to 0.5)
+                rho=200.0,  # density
+                friction_mu=3.0,
+                hydroelastic_modulus=1e8,
+                model="stable_neohookean")
+
+        self.t_shape = self.scene.add_entity(
+            gs.morphs.Mesh(force_retet=True, file="T-shape-modified.obj", pos=self.t_init_pos, quat=self.t_init_quat, scale=1.0), surface=gs.surfaces.Default(color=(0.6, 0.7, 0.8)),
+            material=material
+        )
+        self.marker = self.scene.add_entity(gs.morphs.Mesh(file = "T-shape-modified.obj", pos=self.targ_pos - np.asarray([0.0, 0.0, 0.0495]), quat=self.targ_quat, scale=1.0, collision=False, fixed=True), surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0)))
+        self.table = self.scene.add_entity(gs.morphs.Box(size=(2.0, 2.0, 0.1), pos=(0.0, 0.0, 0.05), fixed=True), material=table_material, surface=gs.surfaces.Default(color=(0.8, 0.7, 0.6)))
+
+
+        if self.debug_mode:
+            self.mark_point = self.scene.add_entity(gs.morphs.Sphere(radius=0.02, collision=False, fixed=True), surface=gs.surfaces.Default(color=(0.0, 1.0, 0.0), opacity=0.5))
+            self.targ_point = self.scene.add_entity(gs.morphs.Sphere(radius=0.02, collision=False, fixed=True), surface=gs.surfaces.Default(color=(1.0, 1.0, 0.0), opacity=0.5))
+            self.current_point = self.scene.add_entity(gs.morphs.Sphere(radius=0.02, collision=False, fixed=True), surface=gs.surfaces.Default(color=(1.0, 0.0, 0.0), opacity=0.5))
+
+        self.hand_cam = self.scene.add_camera(GUI=False, fov=70, res=(320, 320))
+        self.scene_cam = self.scene.add_camera(GUI=False, fov=40, res=(320, 320), pos=(2, 0, 1.5), lookat=(0.0, 0.0, 0.0))
+        self.cams = [self.hand_cam, self.scene_cam]
+        T = np.eye(4)
+        T[:3, :3] = np.array([
+            [1,  0,  0],
+            [0, -1,  0],
+            [0,  0, -1]
+        ])
+        T[:3, 3] = np.array([0.1, 0.0, 0.1])
+        self.hand_cam.attach(self.franka.get_link("hand"), T)
+
+        self.scene.build()
+
+        print(f"{self.t_shape.get_mass_mat()}")
+
+        self.motors_dof = np.arange(7)
+        self.fingers_dof = np.arange(7, 9)
+
+        # Optional: set control gains
+        self.franka.set_dofs_kp(
+            np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000, 100, 100]),
+        )
+        self.franka.set_dofs_kv(
+            np.array([450, 450, 350, 350, 200, 200, 200, 10, 10]),
+        )
+        self.franka.set_dofs_force_range(
+            np.array([-87, -87, -87, -87, -12, -12, -12, -100, -100]),
+            np.array([87, 87, 87, 87, 12, 12, 12, 100, 100]),
+        )
+
+        # franka.control_dofs_position(np.array([0, 0]), fingers_dof) # you can also use position control
+        self.control_policy = ControlPolicy()
+
     def set_pos_quat(self, pos, quat):
         self.scene.reset()
         
@@ -366,8 +433,8 @@ class TaskEnv:
         pos=np.array([0.55, -0.05, 0.125]) + np.array([poffset[0] * 0.5, poffset[1], 0.0])
         quat=np.array([quat_offset[0], 0.0, 0.0, quat_offset[1]])
 
-        pos = np.array([0.0, 0.0, 0.125])
-        quat = np.array([1.0, 0.0, 0.0, 0.0])
+        # pos = np.array([0.0, 0.0, 0.125])
+        # quat = np.array([1.0, 0.0, 0.0, 0.0])
 
         self.set_pos_quat(pos, quat)
 
@@ -407,6 +474,12 @@ class TaskEnv:
     def reward(self):
         dpos, dquat = self.targ_dist()
         return TaskEnv.combined_dist(dpos, dquat)
+    
+    def get_head_pos(self):
+        return self.end_effector.get_pos().cpu().numpy() + [-0.001, -0.001, -0.103]
+    
+    def set_head_pos(self, new_head_pos):
+        self.end_targ_pos = new_head_pos + [0.003, 0.004, 0.112]
 
     def step(self):
         # get R from t_shape.get_quat with numpy functions
@@ -416,10 +489,10 @@ class TaskEnv:
 
         self.scene.step()
         if self.debug_mode:
-            # self.targ_point.set_pos(self.end_targ_pos + [-0.003, -0.004, -0.112])
+            self.targ_point.set_pos(self.end_targ_pos + [-0.003, -0.004, -0.112])
+
             # Get position of end effector
-            eff_pos = self.end_effector.get_pos().cpu().numpy()
-            self.current_point.set_pos(eff_pos + [-0.001, -0.001, -0.103])
+            self.current_point.set_pos(self.get_head_pos())
         r = self.targ_dist()
         print("targ dist:", r)
         for cam in self.cams:
@@ -433,13 +506,17 @@ class TaskEnv:
         self.reset_by_seed(seed)
         for cam in self.cams:
             cam.start_recording()
-        for i in range(30):
+        for i in range(10):
             self.step()
 
         last_dpos, last_dquat = self.targ_dist()
 
         # lift
-        while last_dpos > 0.005 or last_dquat > 0.05:
+        step = 0
+        while (last_dpos > 0.005 or last_dquat > 0.05) and step < 20:
+            step += 1
+            self.control_policy.control(self)
+            
             qpos = self.franka.inverse_kinematics(
                 link=self.end_effector,
                 pos=self.end_targ_pos,
@@ -452,19 +529,6 @@ class TaskEnv:
             new_combined_score = TaskEnv.combined_dist(new_dpos, new_dquat)
 
             last_dpos, last_dquat = new_dpos, new_dquat
-            
-
-        self.end_targ_pos[2] = 0.3
-        self.end_targ_pos -= self.push_direction * 0.1
-
-        for i in range(50):
-            qpos = self.franka.inverse_kinematics(
-                link=self.end_effector,
-                pos=self.end_targ_pos,
-                quat=np.array([0, 1, 0, 0]),
-            )
-            self.franka.control_dofs_position(qpos[:-2], self.motors_dof)
-            self.step()
 
         self.hand_cam.stop_recording(f"{self.data_dir}/hand_record{self.seed}.mp4")
         self.scene_cam.stop_recording(f"{self.data_dir}/scene_record{self.seed}.mp4")
