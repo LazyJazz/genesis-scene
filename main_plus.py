@@ -129,6 +129,68 @@ def recover_pos_quat(P, Q):
 
     return t, rotation_to_quaternion(R)
 
+def quat_to_axis_angle(quat):
+    if quat[0] < 0:
+        quat = -quat
+    quat /= np.linalg.norm(quat)
+    axis = quat[1:]
+    if np.linalg.norm(axis) < 1e-8:
+        return np.array([0.0, 0.0, 0.0])
+    else:
+        angle = 2.0 * np.arccos(quat[0])
+        axis = axis / np.linalg.norm(axis)
+        return axis * angle
+
+def cube_sdf(lower_bound, upper_bound, x):
+    sdf = 0.0
+    normal = [0.0, 0.0, 0.0]
+    diff = [0.0, 0.0, 0.0]
+    dim_sdf = [0.0, 0.0, 0.0]
+    for i in range(3):
+        dim_sdf[i] = max(lower_bound[i] - x[i], x[i] - upper_bound[i])
+        if x[i] < lower_bound[i]:
+            diff[i] = x[i] - lower_bound[i]
+        elif x[i] > upper_bound[i]:
+            diff[i] = x[i] - upper_bound[i]
+    if dim_sdf[0] < 0 and dim_sdf[1] < 0 and dim_sdf[2] < 0:
+        sdf = max(dim_sdf[0], dim_sdf[1], dim_sdf[2])
+        if sdf == dim_sdf[0]:
+            if x[0] - lower_bound[0] < upper_bound[0] - x[0]:
+                normal = [-1.0, 0.0, 0.0]
+            else:
+                normal = [1.0, 0.0, 0.0]
+        elif sdf == dim_sdf[1]:
+            if x[1] - lower_bound[1] < upper_bound[1] - x[1]:
+                normal = [0.0, -1.0, 0.0]
+            else:
+                normal = [0.0, 1.0, 0.0]
+        else:
+            if x[2] - lower_bound[2] < upper_bound[2] - x[2]:
+                normal = [0.0, 0.0, -1.0]
+            else:
+                normal = [0.0, 0.0, 1.0]
+    else:
+        sdf = np.linalg.norm(diff)
+        if sdf > 1e-8:
+            normal = diff / sdf
+        else:
+            normal = [0.0, 0.0, 0.0]
+    return sdf, normal
+
+def t_shape_sdf(x):
+    lower_bound = np.array([-0.075, 0.005, -0.025])
+    upper_bound = np.array([0.075, 0.055, 0.025])
+    sdf1, normal1 = cube_sdf(lower_bound, upper_bound, x)
+
+    lower_bound = np.array([-0.25, -0.095, -0.025])
+    upper_bound = np.array([0.25, 0.055, 0.025])
+    sdf2, normal2 = cube_sdf(lower_bound, upper_bound, x)
+
+    if sdf1 < sdf2:
+        return sdf1, normal1
+    else:
+        return sdf2, normal2
+
 class ControlPolicy:
     def __init__(self):
         
@@ -220,7 +282,8 @@ class ControlPolicy:
 
         tpos_diff = (env.targ_pos - pos) / 0.1
         tpos_diff_in_obj = R.T @ tpos_diff
-        tquat_diff = quat_multiply(env.targ_quat, quat_conjugate(quat))
+        tquat_diff = quat_multiply(quat_conjugate(env.targ_quat), quat)
+        tangle_diff = quat_to_axis_angle(tquat_diff)[2]
 
 
         # find the closest key point
@@ -230,30 +293,51 @@ class ControlPolicy:
             # cross 
             r = key_point
             f = -self.key_point_normals[i]
-            tau = np.cross(r, f)
+            tau = np.cross(r / 0.1, f)
             omega = tau / 0.3
-            f /= 0.1
-            q_omega = 0.5 * np.array([0.0, omega[0], omega[1], omega[2]])
-            quat_dot = quat_multiply(quat, q_omega)
-            tquat_diff_dot = quat_multiply(env.targ_quat, quat_conjugate(quat_dot))
-            E = np.dot(tpos_diff_in_obj, tpos_diff_in_obj)
-            E_dot = -2.0 * np.dot(tpos_diff_in_obj, f)
-            if tquat_diff[0] < 0:
-                E += (tquat_diff[0] + 1) ** 2
-                E_dot += 2.0 * (tquat_diff_dot[0] + 1) * tquat_diff_dot[0]
-            else:
-                E += (tquat_diff[0] - 1) ** 2
-                E_dot += 2.0 * (tquat_diff_dot[0] - 1) * tquat_diff_dot[0]
+            E = np.dot(tpos_diff_in_obj / 0.1, tpos_diff_in_obj / 0.1)
+            E_dot = -2.0 * np.dot(tpos_diff_in_obj, f) * 100
+
+            E += tangle_diff ** 2
+            E_dot += 2.0 * tangle_diff * omega[2]
 
             if E_dot < best_score:
                 best_score = E_dot
                 best_index = i
 
-        env.mark_point.set_pos(R @ (self.key_point_poses[best_index] + self.key_point_normals[best_index] * 0.02) + pos)
+        kp_pos = self.key_point_poses[best_index].copy()
+        kp_pos[2] = 0.025
+        kp_normal = self.key_point_normals[best_index]
+        start_point = kp_pos + kp_normal * 0.02
+
+        env.mark_point.set_pos(R @ start_point + pos)
+
+        targ_z = 0.025
+        speed = 0.02
+        move_dir_xy = start_point[:2] - rel_pos_in_obj[:2]
+        move_dir_z = targ_z - rel_pos_in_obj[2]
+        if np.linalg.norm(rel_pos_in_obj[:2] - start_point[:2]) > 0.005:
+            targ_z = 0.035
+            speed = 0.05
+            if rel_pos_in_obj[2] < 0.032:
+                # set move_dir_xy to zero
+                move_dir_xy[:] = 0.0
+        else:
+            targ_z = 0.025
+
+        move_dir_z = targ_z - rel_pos_in_obj[2]
+        move_direction[:2] = move_dir_xy
+        move_direction[2] = move_dir_z
+
+        kp_diff = rel_pos_in_obj - kp_pos
+        ortho_kp_diff = kp_diff - np.dot(kp_diff, kp_normal) * kp_normal
+        if np.dot(kp_diff, kp_normal) > 0 and np.linalg.norm(ortho_kp_diff) < 0.005:
+            move_direction = -kp_normal - ortho_kp_diff * 100.0
+
 
         # normalize
         move_direction /= (np.linalg.norm(move_direction) + 1e-8)
-        env.set_head_pos(head_pos + R @ move_direction * 0.03)
+        env.set_head_pos(head_pos + R @ move_direction * speed)
 
         
 
@@ -513,7 +597,7 @@ class TaskEnv:
 
         # lift
         step = 0
-        while (last_dpos > 0.005 or last_dquat > 0.05) and step < 20:
+        while last_dpos > 0.005 or last_dquat > 0.05:
             step += 1
             self.control_policy.control(self)
             
