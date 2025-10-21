@@ -271,6 +271,8 @@ class ControlPolicy:
         for key_point_normals in self.key_point_normals:
             key_point_normals /= np.linalg.norm(key_point_normals)
 
+        self.last_index = -1
+
     def control(self, env: TaskEnv):
         pos, quat = env.get_pos_quat()
         print(f"pos: {pos}, quat: {quat}")
@@ -289,28 +291,39 @@ class ControlPolicy:
         # find the closest key point
         best_score = 1e8
         best_index = -1
+        keep_index = False
         for i, key_point in enumerate(self.key_point_poses):
             # cross 
             r = key_point
             f = -self.key_point_normals[i]
             tau = np.cross(r / 0.1, f)
             omega = tau / 0.3
-            E = np.dot(tpos_diff_in_obj / 0.1, tpos_diff_in_obj / 0.1)
-            E_dot = -2.0 * np.dot(tpos_diff_in_obj, f) * 100
+            E = np.dot(tpos_diff_in_obj, tpos_diff_in_obj)
+            E_dot = -2.0 * np.dot(tpos_diff_in_obj, f)
 
             E += tangle_diff ** 2
             E_dot += 2.0 * tangle_diff * omega[2]
 
+            if i == self.last_index and E_dot < 0:
+                keep_index = True
+                break
+
             if E_dot < best_score:
                 best_score = E_dot
                 best_index = i
+
+        if keep_index:
+            best_index = self.last_index
+
+        self.last_index = best_index
 
         kp_pos = self.key_point_poses[best_index].copy()
         kp_pos[2] = 0.025
         kp_normal = self.key_point_normals[best_index]
         start_point = kp_pos + kp_normal * 0.02
 
-        env.mark_point.set_pos(R @ start_point + pos)
+        if env.debug_mode:
+            env.mark_point.set_pos(R @ start_point + pos)
 
         targ_z = 0.025
         speed = 0.02
@@ -333,6 +346,7 @@ class ControlPolicy:
         ortho_kp_diff = kp_diff - np.dot(kp_diff, kp_normal) * kp_normal
         if np.dot(kp_diff, kp_normal) > 0 and np.linalg.norm(ortho_kp_diff) < 0.005:
             move_direction = -kp_normal - ortho_kp_diff * 100.0
+            speed = 0.02
 
 
         # normalize
@@ -635,7 +649,7 @@ class TaskEnv:
 def main():
     # make dir data/ is not exists
     gs.init(backend=gs.gpu)
-    env = TaskEnv(debug_mode=True, material="rigid")
+    env = TaskEnv(debug_mode=False, material="rigid")
     for seed in range(100):
         env.run(seed=seed)
 
