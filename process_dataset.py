@@ -209,7 +209,7 @@ class DatasetProcessor:
 
 def main():
     # 设置实验目录
-    experiment_dir = "/mnt/nas/yunze/reseach/genesis/genesis-scene/datasets/experiment_20251016_141822"
+    experiment_dir = "datasets/experiment_20251022_125257"
     output_dir = "processed_dataset"
     
     # 创建处理器并处理数据
