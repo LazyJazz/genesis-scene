@@ -30,7 +30,7 @@ class DatasetProcessor:
         """
         # 转换为RGB
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
+
         # 转换为float32并归一化到[0,1]
         frame = frame.astype(np.float32) / 255.0
         

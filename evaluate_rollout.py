@@ -7,6 +7,9 @@ from pathlib import Path
 from tqdm import tqdm
 from models.diffusion import DiffusionPolicy
 from dataset import RoboticDataset
+from task_env import TaskEnv
+
+import genesis as gs
 
 class RolloutEvaluator:
     def __init__(self, model_path, device="cuda"):
@@ -48,52 +51,29 @@ class RolloutEvaluator:
         current_pos = start_pos
         
         # 创建初始观测图像
-        image = self.create_observation(current_pos)
-        image_tensor = torch.from_numpy(image).float().unsqueeze(0).to(self.device)
-        
+
+        gs.init(backend=gs.gpu)
+        env = TaskEnv(debug_mode=True)
+        env.reset_by_seed(0)
+        env.step()
+
         for _ in tqdm(range(num_steps), desc="Generating trajectory"):
             with torch.no_grad():
                 # 使用模型预测下一个动作
-                action = self.model.sample(image_tensor)
+                img = env.get_obs()['images'][0]
+                frame = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)
+                frame_tensor = torch.tensor(frame, dtype=torch.float32).unsqueeze(0).to(self.device)
+                print(frame_tensor.shape)
+                action = self.model.sample(frame_tensor)
                 action = action.cpu().numpy()[0]  # (3,)
+                action = action / np.linalg.norm(action) * 0.02  # 归一化并缩放动作大小
+                env.set_targ_pos(env.get_head_pos() + action)
                 
                 # 更新位置
-                current_pos = current_pos + action
-                
-                # 记录
-                positions.append(current_pos.copy())
-                actions.append(action)
-                
-                # 更新观测图像
-                image = self.create_observation(current_pos)
-                image_tensor = torch.from_numpy(image).float().unsqueeze(0).to(self.device)
+                env.step()
         
         return np.array(positions), np.array(actions)
-    
-    def create_observation(self, position):
-        """创建观测图像（简化版本，实际使用时需要匹配训练数据的图像生成方式）
-        
-        Args:
-            position: 当前位置 (3,)
-            
-        Returns:
-            observation: 图像数组 (C, H, W)
-        """
-        # 创建一个简单的可视化图像
-        H, W = 320, 320
-        image = np.zeros((H, W, 3), dtype=np.float32)
-        
-        # 将3D位置映射到2D图像坐标
-        x, y, z = position
-        px = int(np.clip((x + 1) * W / 2, 0, W-1))  # 将x从[-1,1]映射到[0,W]并限制范围
-        py = int(np.clip((y + 1) * H / 2, 0, H-1))  # 将y从[-1,1]映射到[0,H]并限制范围
-        
-        # 绘制当前位置
-        cv2.circle(image, (int(px), int(py)), 5, (1.0, 0.0, 0.0), -1)
-        
-        # 转换为(C,H,W)格式
-        image = image.transpose(2, 0, 1)
-        return image
+
     
     def save_trajectory_video(self, positions, output_path, fps=30):
         """保存轨迹视频
